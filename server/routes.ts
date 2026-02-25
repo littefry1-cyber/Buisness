@@ -7,7 +7,30 @@ const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
 
+const AUTO_EVENTS = [
+  "Competitors launched a rival product at lower price",
+  "A major client renewed their contract unexpectedly",
+  "Supply chain disruption hit key components",
+  "The CFO announced a surprise share buyback program",
+  "A whistleblower leaked internal financial documents",
+  "The company received an unsolicited acquisition offer",
+  "A viral social media post criticized product quality",
+  "Government imposed new industry regulations",
+  "Quarterly earnings beat analyst estimates by 12%",
+  "A key patent was invalidated by a court ruling",
+  "The company announced entry into a new international market",
+  "A cyberattack compromised customer data",
+  "Interest rates rose sharply, increasing debt costs",
+  "A major supplier went bankrupt",
+  "The company won a prestigious industry award",
+];
+
 export async function registerRoutes(app: Express): Promise<Server> {
+  app.get("/api/random-event", (_req, res) => {
+    const event = AUTO_EVENTS[Math.floor(Math.random() * AUTO_EVENTS.length)];
+    res.json({ event });
+  });
+
   app.post("/api/process-event", async (req, res) => {
     try {
       const { event, companyName, sector, currentStockPrice, currentRevenue, currentEmployees, eventHistory } = req.body;
@@ -17,43 +40,80 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const historyContext = eventHistory && eventHistory.length > 0
-        ? `\nPrevious events:\n${eventHistory.slice(-5).map((e: any) => `- ${e.description} (stock ${e.stockChange > 0 ? '+' : ''}${e.stockChange}%)`).join('\n')}`
+        ? `\nPrevious events:\n${eventHistory.slice(-5).map((e: any) => `- ${e.description} (stock ${e.stockChange > 0 ? '+' : ''}${e.stockChange.toFixed(1)}%)`).join('\n')}`
         : '';
 
-      const prompt = `You are a realistic financial market simulator. Analyze this business event and provide realistic market impacts.
+      const prompt = `You are a realistic financial market simulator. Analyze this business event and return ONLY a valid JSON object with no extra text.
 
 Company: ${companyName}
 Sector: ${sector}
 Current Stock Price: $${currentStockPrice.toFixed(2)}
-Current Annual Revenue: $${(currentRevenue / 1000000).toFixed(1)}M
-Current Employees: ${currentEmployees}${historyContext}
+Annual Revenue: $${(currentRevenue / 1_000_000).toFixed(1)}M
+Employees: ${currentEmployees}${historyContext}
 
-New Event: "${event}"
+Event: "${event}"
 
-Respond with a JSON object (no markdown, just raw JSON) with these exact fields:
+Return this exact JSON structure:
 {
-  "stockChangePercent": number (positive = gain, negative = loss, range -30 to +30, realistic based on event severity),
-  "revenueChangePercent": number (range -20 to +20),
-  "employeeChange": number (integer, can be negative for layoffs),
-  "sentiment": "very_positive" | "positive" | "neutral" | "negative" | "very_negative",
-  "headline": string (short punchy news headline, max 80 chars),
-  "summary": string (2-3 sentence market analysis),
-  "analystRating": "Strong Buy" | "Buy" | "Hold" | "Sell" | "Strong Sell",
-  "analystNote": string (1-2 sentence analyst commentary),
-  "marketReaction": string (one sentence describing market reaction)
+  "stockChangePercent": <number between -25 and 25>,
+  "revenueChangePercent": <number between -15 and 15>,
+  "employeeChange": <integer>,
+  "sentiment": <"very_positive"|"positive"|"neutral"|"negative"|"very_negative">,
+  "headline": <string max 80 chars>,
+  "summary": <string 2-3 sentences>,
+  "analystRating": <"Strong Buy"|"Buy"|"Hold"|"Sell"|"Strong Sell">,
+  "analystNote": <string 1-2 sentences>,
+  "marketReaction": <string one sentence>
 }`;
 
-      const response = await openai.chat.completions.create({
+      const completion = await openai.chat.completions.create({
         model: "gpt-5-mini",
-        messages: [{ role: "user", content: prompt }],
-        max_completion_tokens: 512,
+        messages: [
+          {
+            role: "system",
+            content: "You are a financial market simulator. Always respond with valid JSON only, no markdown, no explanation.",
+          },
+          { role: "user", content: prompt },
+        ],
+        max_completion_tokens: 600,
       });
 
-      const content = response.choices[0]?.message?.content || "{}";
-      const cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-      const result = JSON.parse(cleaned);
+      const raw = completion.choices[0]?.message?.content ?? "{}";
+      console.log("AI raw response:", raw.slice(0, 200));
 
-      res.json(result);
+      // Strip any markdown fences
+      const cleaned = raw
+        .replace(/```json\s*/gi, "")
+        .replace(/```\s*/gi, "")
+        .trim();
+
+      let result: Record<string, unknown> = {};
+      try {
+        result = JSON.parse(cleaned);
+      } catch (parseErr) {
+        // Extract JSON from the text if possible
+        const match = cleaned.match(/\{[\s\S]*\}/);
+        if (match) {
+          result = JSON.parse(match[0]);
+        } else {
+          throw new Error("Could not parse JSON from AI response");
+        }
+      }
+
+      // Ensure defaults so the client never gets an empty object
+      const safeResult = {
+        stockChangePercent: Number(result.stockChangePercent) || 0,
+        revenueChangePercent: Number(result.revenueChangePercent) || 0,
+        employeeChange: Math.round(Number(result.employeeChange) || 0),
+        sentiment: result.sentiment || "neutral",
+        headline: result.headline || event.slice(0, 80),
+        summary: result.summary || "Market digesting the news.",
+        analystRating: result.analystRating || "Hold",
+        analystNote: result.analystNote || "Monitoring developments.",
+        marketReaction: result.marketReaction || "Traders watching closely.",
+      };
+
+      res.json(safeResult);
     } catch (error) {
       console.error("Error processing event:", error);
       res.status(500).json({ error: "Failed to process event" });

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useMemo, ReactNode, useCallback, useEffect } from "react";
+import React, { createContext, useContext, useState, useMemo, ReactNode, useCallback, useEffect, useRef } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getApiUrl } from "@/lib/query-client";
 
@@ -22,6 +22,7 @@ export interface EventRecord {
   timestamp: number;
   priceBefore: number;
   priceAfter: number;
+  isAuto?: boolean;
 }
 
 export interface CompanyState {
@@ -44,8 +45,10 @@ interface CompanyContextValue {
   stockHistory: StockDataPoint[];
   eventHistory: EventRecord[];
   isProcessing: boolean;
-  submitEvent: (event: string) => Promise<void>;
+  submitEvent: (event: string, isAuto?: boolean) => Promise<void>;
   resetCompany: () => void;
+  autoEventsEnabled: boolean;
+  setAutoEventsEnabled: (enabled: boolean) => void;
 }
 
 const INITIAL_COMPANIES = [
@@ -88,7 +91,9 @@ function generateInitialHistory(startPrice: number): StockDataPoint[] {
   return points;
 }
 
-const STORAGE_KEY = "stocksim_state_v2";
+const STORAGE_KEY = "stocksim_state_v3";
+// Auto-event fires every 45 seconds
+const AUTO_EVENT_INTERVAL_MS = 45_000;
 
 const CompanyContext = createContext<CompanyContextValue | null>(null);
 
@@ -97,7 +102,16 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
   const [stockHistory, setStockHistory] = useState<StockDataPoint[]>([]);
   const [eventHistory, setEventHistory] = useState<EventRecord[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [autoEventsEnabled, setAutoEventsEnabled] = useState(true);
   const [loaded, setLoaded] = useState(false);
+  const processingRef = useRef(false);
+  const autoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Refs to latest values for use inside timer callbacks
+  const companyRef = useRef(company);
+  const eventHistoryRef = useRef(eventHistory);
+  companyRef.current = company;
+  eventHistoryRef.current = eventHistory;
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then((raw) => {
@@ -123,8 +137,14 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ company, stockHistory, eventHistory }));
   }, [company, stockHistory, eventHistory, loaded]);
 
-  const submitEvent = useCallback(async (eventText: string) => {
+  const submitEvent = useCallback(async (eventText: string, isAuto = false) => {
+    if (processingRef.current) return;
+    processingRef.current = true;
     setIsProcessing(true);
+
+    const currentCompany = companyRef.current;
+    const currentHistory = eventHistoryRef.current;
+
     try {
       const baseUrl = getApiUrl();
       const res = await fetch(`${baseUrl}api/process-event`, {
@@ -132,26 +152,32 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           event: eventText,
-          companyName: company.name,
-          sector: company.sector,
-          currentStockPrice: company.stockPrice,
-          currentRevenue: company.revenue,
-          currentEmployees: company.employees,
-          eventHistory: eventHistory.slice(-5),
+          companyName: currentCompany.name,
+          sector: currentCompany.sector,
+          currentStockPrice: currentCompany.stockPrice,
+          currentRevenue: currentCompany.revenue,
+          currentEmployees: currentCompany.employees,
+          eventHistory: currentHistory.slice(0, 5),
         }),
       });
-      if (!res.ok) throw new Error("Failed");
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`HTTP ${res.status}: ${errText}`);
+      }
+
       const data = await res.json();
 
       const stockChangeFactor = 1 + (data.stockChangePercent || 0) / 100;
-      const newPrice = Math.max(company.stockPrice * stockChangeFactor, 0.5);
-      const newRevenue = Math.max(company.revenue * (1 + (data.revenueChangePercent || 0) / 100), 0);
-      const newEmployees = Math.max(company.employees + (data.employeeChange || 0), 0);
+      const newPrice = Math.max(currentCompany.stockPrice * stockChangeFactor, 0.5);
+      const newRevenue = Math.max(currentCompany.revenue * (1 + (data.revenueChangePercent || 0) / 100), 0);
+      const newEmployees = Math.max(currentCompany.employees + (data.employeeChange || 0), 0);
+      const sharesOutstanding = currentCompany.marketCap / currentCompany.stockPrice;
 
       const eventRecord: EventRecord = {
-        id: `${Date.now()}`,
+        id: `${Date.now()}-${Math.random()}`,
         description: eventText,
-        headline: data.headline || eventText,
+        headline: data.headline || eventText.slice(0, 80),
         summary: data.summary || "",
         stockChange: data.stockChangePercent || 0,
         revenueChangePercent: data.revenueChangePercent || 0,
@@ -161,8 +187,9 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
         analystNote: data.analystNote || "",
         marketReaction: data.marketReaction || "",
         timestamp: Date.now(),
-        priceBefore: company.stockPrice,
+        priceBefore: currentCompany.stockPrice,
         priceAfter: newPrice,
+        isAuto,
       };
 
       setCompany((prev) => ({
@@ -170,8 +197,10 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
         stockPrice: newPrice,
         revenue: newRevenue,
         employees: newEmployees,
-        marketCap: newPrice * (prev.marketCap / prev.stockPrice),
-        peRatio: Math.max(prev.peRatio * (1 + (data.stockChangePercent || 0) / 200), 0),
+        marketCap: newPrice * sharesOutstanding,
+        peRatio: Math.max(prev.peRatio + (data.stockChangePercent || 0) * 0.1, 1),
+        cash: Math.max(prev.cash * (1 + (data.revenueChangePercent || 0) / 200), 0),
+        debt: prev.debt * (1 + (data.revenueChangePercent || 0) / -400),
       }));
 
       setStockHistory((prev) => [
@@ -183,11 +212,41 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     } catch (e) {
       console.error("Event processing failed:", e);
     } finally {
+      processingRef.current = false;
       setIsProcessing(false);
     }
-  }, [company, eventHistory]);
+  }, []);
+
+  // Auto-event timer
+  useEffect(() => {
+    if (!loaded || !autoEventsEnabled) return;
+
+    const scheduleNext = () => {
+      autoTimerRef.current = setTimeout(async () => {
+        if (!processingRef.current) {
+          try {
+            const baseUrl = getApiUrl();
+            const res = await fetch(`${baseUrl}api/random-event`);
+            if (res.ok) {
+              const { event } = await res.json();
+              await submitEvent(event, true);
+            }
+          } catch (e) {
+            console.error("Auto-event failed:", e);
+          }
+        }
+        scheduleNext();
+      }, AUTO_EVENT_INTERVAL_MS);
+    };
+
+    scheduleNext();
+    return () => {
+      if (autoTimerRef.current) clearTimeout(autoTimerRef.current);
+    };
+  }, [loaded, autoEventsEnabled, submitEvent]);
 
   const resetCompany = useCallback(() => {
+    if (autoTimerRef.current) clearTimeout(autoTimerRef.current);
     const c = generateInitialCompany();
     setCompany(c);
     setStockHistory(generateInitialHistory(c.stockPrice));
@@ -196,8 +255,8 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ company, stockHistory, eventHistory, isProcessing, submitEvent, resetCompany }),
-    [company, stockHistory, eventHistory, isProcessing, submitEvent, resetCompany]
+    () => ({ company, stockHistory, eventHistory, isProcessing, submitEvent, resetCompany, autoEventsEnabled, setAutoEventsEnabled }),
+    [company, stockHistory, eventHistory, isProcessing, submitEvent, resetCompany, autoEventsEnabled]
   );
 
   return <CompanyContext.Provider value={value}>{children}</CompanyContext.Provider>;

@@ -10,6 +10,7 @@ import {
   Platform,
   KeyboardAvoidingView,
   Keyboard,
+  Switch,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -17,12 +18,14 @@ import * as Haptics from "expo-haptics";
 import Colors from "@/constants/colors";
 import { useCompany, EventRecord } from "@/context/CompanyContext";
 
-const SENTIMENT_CONFIG: Record<string, { color: string; label: string }> = {
-  very_positive: { color: Colors.accent, label: "Very Positive" },
-  positive: { color: "#4CAF7D", label: "Positive" },
-  neutral: { color: Colors.textSecondary, label: "Neutral" },
-  negative: { color: Colors.warning, label: "Negative" },
-  very_negative: { color: Colors.danger, label: "Very Negative" },
+const TAB_BAR_HEIGHT = Platform.OS === "web" ? 84 : 58;
+
+const SENTIMENT_CONFIG: Record<string, { color: string }> = {
+  very_positive: { color: Colors.accent },
+  positive: { color: "#4CAF7D" },
+  neutral: { color: Colors.textSecondary },
+  negative: { color: Colors.warning },
+  very_negative: { color: Colors.danger },
 };
 
 const RATING_COLORS: Record<string, string> = {
@@ -48,6 +51,12 @@ function EventCard({ item }: { item: EventRecord }) {
         <View style={[styles.sentimentDot, { backgroundColor: sentiment.color }]} />
         <View style={styles.eventMeta}>
           <Text style={styles.eventDate}>{dateStr} {timeStr}</Text>
+          {item.isAuto && (
+            <View style={styles.autoBadge}>
+              <Ionicons name="flash" size={10} color={Colors.warning} />
+              <Text style={styles.autoText}>Auto</Text>
+            </View>
+          )}
           <View style={[styles.ratingBadge, { backgroundColor: `${ratingColor}22` }]}>
             <Text style={[styles.ratingText, { color: ratingColor }]}>{item.analystRating}</Text>
           </View>
@@ -89,12 +98,16 @@ function EventCard({ item }: { item: EventRecord }) {
               </Text>
             </View>
           </View>
-          <Text style={styles.summaryText}>{item.summary}</Text>
-          <View style={styles.analystBox}>
-            <Text style={styles.analystLabel}>Analyst Note</Text>
-            <Text style={styles.analystNote}>{item.analystNote}</Text>
-          </View>
-          <Text style={styles.marketReaction}>{item.marketReaction}</Text>
+          {item.summary ? <Text style={styles.summaryText}>{item.summary}</Text> : null}
+          {item.analystNote ? (
+            <View style={styles.analystBox}>
+              <Text style={styles.analystLabel}>Analyst Note</Text>
+              <Text style={styles.analystNote}>{item.analystNote}</Text>
+            </View>
+          ) : null}
+          {item.marketReaction ? (
+            <Text style={styles.marketReaction}>{item.marketReaction}</Text>
+          ) : null}
         </View>
       )}
 
@@ -108,19 +121,22 @@ function EventCard({ item }: { item: EventRecord }) {
 const SUGGESTIONS = [
   "Major product launch exceeded expectations",
   "CEO resigned due to controversy",
-  "Regulatory investigation opened",
   "Record quarterly earnings announced",
-  "Major contract won with government",
-  "Factory explosion causes disruption",
+  "Factory accident caused production halt",
+  "Won a landmark government contract",
+  "Viral PR scandal on social media",
 ];
 
 export default function EventsScreen() {
   const insets = useSafeAreaInsets();
-  const { eventHistory, isProcessing, submitEvent } = useCompany();
+  const { eventHistory, isProcessing, submitEvent, autoEventsEnabled, setAutoEventsEnabled } = useCompany();
   const [input, setInput] = useState("");
   const inputRef = useRef<TextInput>(null);
+
   const topPad = Platform.OS === "web" ? 67 : insets.top;
   const bottomPad = Platform.OS === "web" ? 34 : insets.bottom;
+  // Extra space for tab bar since it's absolutely positioned
+  const tabOffset = TAB_BAR_HEIGHT + bottomPad;
 
   const handleSubmit = async () => {
     const trimmed = input.trim();
@@ -128,7 +144,7 @@ export default function EventsScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setInput("");
     Keyboard.dismiss();
-    await submitEvent(trimmed);
+    await submitEvent(trimmed, false);
   };
 
   const handleSuggestion = (s: string) => {
@@ -140,27 +156,44 @@ export default function EventsScreen() {
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === "ios" ? "padding" : "height"}
-      keyboardVerticalOffset={90}
+      keyboardVerticalOffset={TAB_BAR_HEIGHT + (Platform.OS === "ios" ? insets.bottom : 0)}
     >
       <View style={[styles.titleBar, { paddingTop: topPad + 12 }]}>
-        <Text style={styles.screenTitle}>Event Feed</Text>
-        <Text style={styles.screenSub}>What happens to your company?</Text>
+        <View style={styles.titleRow}>
+          <View>
+            <Text style={styles.screenTitle}>Event Feed</Text>
+            <Text style={styles.screenSub}>{eventHistory.length} events recorded</Text>
+          </View>
+          <View style={styles.autoRow}>
+            <Ionicons name="flash" size={14} color={autoEventsEnabled ? Colors.warning : Colors.textMuted} />
+            <Text style={[styles.autoLabel, { color: autoEventsEnabled ? Colors.warning : Colors.textMuted }]}>
+              Auto
+            </Text>
+            <Switch
+              value={autoEventsEnabled}
+              onValueChange={setAutoEventsEnabled}
+              trackColor={{ false: Colors.border, true: `${Colors.warning}66` }}
+              thumbColor={autoEventsEnabled ? Colors.warning : Colors.textMuted}
+              style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+            />
+          </View>
+        </View>
       </View>
 
       <FlatList
         data={eventHistory}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => <EventCard item={item} />}
-        contentContainerStyle={styles.listContent}
-        scrollEnabled={!!eventHistory.length}
+        contentContainerStyle={[styles.listContent, { paddingBottom: tabOffset + 80 }]}
+        scrollEnabled
         ListEmptyComponent={
           <View style={styles.emptyState}>
             <Ionicons name="flash-outline" size={48} color={Colors.textMuted} />
             <Text style={styles.emptyTitle}>No events yet</Text>
             <Text style={styles.emptyText}>
-              Describe what happens to your company and watch the market react.
+              Type below or wait for an auto-event to hit your company.
             </Text>
-            <Text style={styles.emptyHint}>Try:</Text>
+            <Text style={styles.emptyHint}>Try one of these:</Text>
             <View style={styles.suggestionGrid}>
               {SUGGESTIONS.map((s) => (
                 <Pressable key={s} onPress={() => handleSuggestion(s)} style={styles.suggestionChip}>
@@ -175,8 +208,7 @@ export default function EventsScreen() {
       />
 
       {eventHistory.length > 0 && !isProcessing && (
-        <View style={styles.suggestionsRow}>
-          <Text style={styles.suggestLabel}>Quick:</Text>
+        <View style={styles.suggestionsWrap}>
           <FlatList
             horizontal
             data={SUGGESTIONS.slice(0, 4)}
@@ -187,12 +219,12 @@ export default function EventsScreen() {
               </Pressable>
             )}
             showsHorizontalScrollIndicator={false}
-            style={styles.suggestList}
+            contentContainerStyle={{ paddingHorizontal: 16, gap: 8 }}
           />
         </View>
       )}
 
-      <View style={[styles.inputBar, { paddingBottom: Math.max(bottomPad, 12) }]}>
+      <View style={[styles.inputBar, { paddingBottom: tabOffset }]}>
         {isProcessing && (
           <View style={styles.processingRow}>
             <ActivityIndicator size="small" color={Colors.accent} />
@@ -210,7 +242,6 @@ export default function EventsScreen() {
             multiline
             maxLength={300}
             editable={!isProcessing}
-            returnKeyType="default"
           />
           <Pressable
             onPress={handleSubmit}
@@ -227,10 +258,13 @@ export default function EventsScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.dark.background },
-  titleBar: { paddingHorizontal: 16, paddingBottom: 12 },
+  titleBar: { paddingHorizontal: 16, paddingBottom: 10 },
+  titleRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
   screenTitle: { fontSize: 28, fontWeight: "800", color: Colors.dark.text, letterSpacing: -0.5 },
   screenSub: { fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
-  listContent: { paddingHorizontal: 16, paddingBottom: 16 },
+  autoRow: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: Colors.surface, borderRadius: 12, padding: 8, borderWidth: 1, borderColor: Colors.border },
+  autoLabel: { fontSize: 12, fontWeight: "700" },
+  listContent: { paddingHorizontal: 16 },
   eventCard: {
     backgroundColor: Colors.surface,
     borderRadius: 16,
@@ -240,9 +274,11 @@ const styles = StyleSheet.create({
     borderColor: Colors.border,
   },
   eventHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8 },
-  sentimentDot: { width: 8, height: 8, borderRadius: 4 },
-  eventMeta: { flex: 1, flexDirection: "row", alignItems: "center", gap: 8 },
+  sentimentDot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
+  eventMeta: { flex: 1, flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" },
   eventDate: { fontSize: 11, color: Colors.textMuted },
+  autoBadge: { flexDirection: "row", alignItems: "center", gap: 3, backgroundColor: `${Colors.warning}22`, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 },
+  autoText: { fontSize: 10, color: Colors.warning, fontWeight: "700" },
   ratingBadge: { borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2 },
   ratingText: { fontSize: 11, fontWeight: "700" },
   stockChangeBadge: { flexDirection: "row", alignItems: "center", gap: 2, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4 },
@@ -261,19 +297,23 @@ const styles = StyleSheet.create({
   analystNote: { fontSize: 13, color: Colors.dark.text, lineHeight: 19 },
   marketReaction: { fontSize: 12, color: Colors.textSecondary, fontStyle: "italic" },
   chevronRow: { alignItems: "center", marginTop: 8 },
-  emptyState: { alignItems: "center", paddingTop: 48, paddingHorizontal: 20 },
+  emptyState: { alignItems: "center", paddingTop: 40, paddingHorizontal: 20 },
   emptyTitle: { fontSize: 20, fontWeight: "700", color: Colors.dark.text, marginTop: 16, marginBottom: 8 },
   emptyText: { fontSize: 14, color: Colors.textSecondary, textAlign: "center", lineHeight: 21, marginBottom: 24 },
   emptyHint: { fontSize: 12, color: Colors.textMuted, fontWeight: "600", textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 },
   suggestionGrid: { gap: 8, width: "100%" },
   suggestionChip: { backgroundColor: Colors.surface, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: Colors.border },
   suggestionText: { fontSize: 13, color: Colors.dark.text },
-  suggestionsRow: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 8 },
-  suggestLabel: { fontSize: 11, color: Colors.textMuted, fontWeight: "600", marginRight: 8 },
-  suggestList: { flex: 1 },
-  miniChip: { backgroundColor: Colors.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, marginRight: 8, borderWidth: 1, borderColor: Colors.border },
-  miniChipText: { fontSize: 12, color: Colors.textSecondary, maxWidth: 150 },
-  inputBar: { backgroundColor: Colors.surface, borderTopWidth: 1, borderTopColor: Colors.border, paddingHorizontal: 16, paddingTop: 12 },
+  suggestionsWrap: { paddingVertical: 8, borderTopWidth: 1, borderTopColor: Colors.border },
+  miniChip: { backgroundColor: Colors.surface, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: Colors.border },
+  miniChipText: { fontSize: 12, color: Colors.textSecondary, maxWidth: 160 },
+  inputBar: {
+    backgroundColor: Colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+  },
   processingRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8 },
   processingText: { fontSize: 13, color: Colors.accent },
   inputRow: { flexDirection: "row", alignItems: "flex-end", gap: 10 },
@@ -292,9 +332,9 @@ const styles = StyleSheet.create({
   },
   sendBtn: {
     backgroundColor: Colors.accent,
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: "center",
     justifyContent: "center",
   },
