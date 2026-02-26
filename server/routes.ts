@@ -67,7 +67,7 @@ Return this exact JSON structure:
 }`;
 
       const completion = await openai.chat.completions.create({
-        model: "gpt-5-mini",
+        model: "gpt-5.1",
         messages: [
           {
             role: "system",
@@ -78,7 +78,9 @@ Return this exact JSON structure:
         max_completion_tokens: 600,
       });
 
-      const raw = completion.choices[0]?.message?.content ?? "{}";
+      const msg = completion.choices[0]?.message;
+      // Some models return content in different fields — check all
+      const raw = msg?.content || (msg as any)?.reasoning_content || "{}";
       console.log("AI raw response:", raw.slice(0, 200));
 
       // Strip any markdown fences
