@@ -1,0 +1,199 @@
+diff --git a/app/(tabs)/index.tsx b/app/(tabs)/index.tsx
+index 3f6a34a..bb83955 100644
+--- a/app/(tabs)/index.tsx
++++ b/app/(tabs)/index.tsx
+@@ -81,10 +81,11 @@ function MetricCard({ label, value, sub, trend }: { label: string; value: string
+ }
+ 
+ function formatCurrency(n: number): string {
++  if (n >= 1_000_000_000_000) return `$${(n / 1_000_000_000_000).toFixed(1)}T`;
+   if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(1)}B`;
+   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
+   if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
+-  return `$${n.toFixed(0)}`;
++  return `$${n.toFixed(2)}`;
+ }
+ 
+ function formatNum(n: number): string {
+@@ -100,6 +101,7 @@ export default function DashboardScreen() {
+   const priceChange = useMemo(() => {
+     if (stockHistory.length < 2) return 0;
+     const first = stockHistory[0].price;
++    if (first === 0) return 0;
+     return ((company.stockPrice - first) / first) * 100;
+   }, [stockHistory, company.stockPrice]);
+ 
+@@ -140,7 +142,11 @@ export default function DashboardScreen() {
+         style={styles.priceCard}
+       >
+         <View style={styles.priceRow}>
+-          <Text style={styles.stockPrice}>${company.stockPrice.toFixed(2)}</Text>
++          <Text style={styles.stockPrice}>
++            ${company.stockPrice >= 10000
++              ? company.stockPrice.toFixed(0)
++              : company.stockPrice.toFixed(2)}
++          </Text>
+           <View style={[styles.changeBadge, { backgroundColor: priceChange >= 0 ? "rgba(0,212,161,0.15)" : "rgba(255,71,87,0.15)" }]}>
+             <Ionicons
+               name={priceChange >= 0 ? "arrow-up" : "arrow-down"}
+diff --git a/app/(tabs)/reports.tsx b/app/(tabs)/reports.tsx
+index 3e7a833..d3a1989 100644
+--- a/app/(tabs)/reports.tsx
++++ b/app/(tabs)/reports.tsx
+@@ -13,10 +13,11 @@ import Colors from "@/constants/colors";
+ import { useCompany, EventRecord } from "@/context/CompanyContext";
+ 
+ function formatCurrency(n: number): string {
++  if (n >= 1_000_000_000_000) return `$${(n / 1_000_000_000_000).toFixed(2)}T`;
+   if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(2)}B`;
+   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+   if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
+-  return `$${n.toFixed(0)}`;
++  return `$${n.toFixed(2)}`;
+ }
+ 
+ const RATING_COLORS: Record<string, string> = {
+diff --git a/context/CompanyContext.tsx b/context/CompanyContext.tsx
+index 2c104fe..170de35 100644
+--- a/context/CompanyContext.tsx
++++ b/context/CompanyContext.tsx
+@@ -122,18 +122,46 @@ function applyEventToCompany(
+   prev: CompanyState,
+   data: Record<string, unknown>
+ ): CompanyState {
+-  const stockChangeFactor = 1 + (Number(data.stockChangePercent) || 0) / 100;
+-  const newPrice = Math.max(prev.stockPrice * stockChangeFactor, 0.5);
+-  const sharesOutstanding = prev.marketCap / prev.stockPrice;
++  const stockChangePercent = Number(data.stockChangePercent) || 0;
++  const revenueChangePercent = Number(data.revenueChangePercent) || 0;
++  const employeeChange = Math.round(Number(data.employeeChange)) || 0;
++
++  const stockChangeFactor = 1 + stockChangePercent / 100;
++  const newPrice = Math.max(prev.stockPrice * stockChangeFactor, 0.01);
++
++  const sharesOutstanding = prev.marketCap / Math.max(prev.stockPrice, 0.01);
++  const newMarketCap = newPrice * sharesOutstanding;
++
++  const newRevenue = Math.max(prev.revenue * (1 + revenueChangePercent / 100), 0);
++  const newEmployees = Math.max(prev.employees + employeeChange, 0);
++
++  // P/E ratio: scale proportionally but keep it bounded and sensible
++  const absChange = Math.abs(stockChangePercent);
++  const peShift = absChange <= 50
++    ? stockChangePercent * 0.1
++    : Math.sign(stockChangePercent) * (5 + Math.log10(absChange) * 3);
++  const newPeRatio = Math.max(Math.min(prev.peRatio + peShift, 500), 1);
++
++  // Cash and debt scale with revenue changes, with floors
++  const newCash = Math.max(prev.cash * (1 + revenueChangePercent / 200), 0);
++  const newDebt = Math.max(prev.debt * (1 - revenueChangePercent / 400), 0);
++
++  // Dividend yield adjusts inversely to stock price changes
++  const newDividendYield = Math.max(
++    prev.dividendYield * (prev.stockPrice / Math.max(newPrice, 0.01)),
++    0
++  );
++
+   return {
+     ...prev,
+     stockPrice: newPrice,
+-    revenue: Math.max(prev.revenue * (1 + (Number(data.revenueChangePercent) || 0) / 100), 0),
+-    employees: Math.max(prev.employees + (Math.round(Number(data.employeeChange)) || 0), 0),
+-    marketCap: newPrice * sharesOutstanding,
+-    peRatio: Math.max(prev.peRatio + (Number(data.stockChangePercent) || 0) * 0.1, 1),
+-    cash: Math.max(prev.cash * (1 + (Number(data.revenueChangePercent) || 0) / 200), 0),
+-    debt: prev.debt * (1 + (Number(data.revenueChangePercent) || 0) / -400),
++    revenue: newRevenue,
++    employees: newEmployees,
++    marketCap: newMarketCap,
++    peRatio: newPeRatio,
++    cash: newCash,
++    debt: newDebt,
++    dividendYield: Math.min(newDividendYield, 99), // cap at 99% yield
+   };
+ }
+ 
+@@ -193,7 +221,11 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
+         try {
+           const saved = JSON.parse(raw);
+           if (saved.company) setCompany(saved.company);
+-          if (saved.stockHistory) setStockHistory(saved.stockHistory);
++          if (saved.stockHistory && saved.stockHistory.length > 0) {
++            setStockHistory(saved.stockHistory);
++          } else if (saved.company) {
++            setStockHistory(generateInitialHistory(saved.company.stockPrice));
++          }
+           if (saved.eventHistory) setEventHistory(saved.eventHistory);
+           setLoaded(true);
+           return;
+diff --git a/server/routes.ts b/server/routes.ts
+index 879628d..d1b4661 100644
+--- a/server/routes.ts
++++ b/server/routes.ts
+@@ -43,11 +43,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
+         return res.status(400).json({ error: "Event and company name required" });
+       }
+ 
++      // Parse explicit percentage mentions from the user's event text
++      const percentMatch = event.match(
++        /(?:go(?:es)?|rise[sd]?|increase[sd]?|up|jump[sed]?|surge[sd]?|gain[sed]?|grow[sn]?|climb[sed]?|rocket[sed]?|soar[sed]?|spike[sd]?|boost[sed]?)\s+(?:by\s+)?(\d+(?:\.\d+)?)%/i
++      ) || event.match(
++        /(?:drop[sped]*|fall[sn]?|decrease[sd]?|down|crash(?:es|ed)?|decline[sd]?|sink[s]?|plummet[sed]?|tank[sed]?|lose[s]?|lost|plunge[sd]?)\s+(?:by\s+)?(\d+(?:\.\d+)?)%/i
++      ) || event.match(
++        /(\d+(?:\.\d+)?)%\s+(?:increase|decrease|rise|drop|gain|loss|up|down|jump|crash|surge|decline)/i
++      );
++
++      const directionDown = event.match(
++        /(?:drop|fall|decrease|down|crash|decline|sink|plummet|tank|lose|lost|plunge)/i
++      );
++
++      let explicitPercent: number | null = null;
++      if (percentMatch) {
++        const rawNum = parseFloat(percentMatch[1]);
++        if (!isNaN(rawNum)) {
++          explicitPercent = directionDown ? -rawNum : rawNum;
++        }
++      }
++
+       const historyContext = eventHistory && eventHistory.length > 0
+         ? `\nPrevious events:\n${eventHistory.slice(-5).map((e: any) => `- ${e.description} (stock ${e.stockChange > 0 ? '+' : ''}${e.stockChange.toFixed(1)}%)`).join('\n')}`
+         : '';
+ 
+-      const prompt = `You are a realistic financial market simulator. Analyze this business event and return ONLY a valid JSON object with no extra text.
++      const explicitInstruction = explicitPercent !== null
++        ? `\n\nCRITICAL: The user specified an EXACT stock change of ${explicitPercent > 0 ? '+' : ''}${explicitPercent}%. You MUST set "stockChangePercent" to EXACTLY ${explicitPercent}. Do NOT cap it, do NOT adjust it, do NOT reduce it. Use the exact number ${explicitPercent} for stockChangePercent. Scale revenueChangePercent and employeeChange proportionally to match the magnitude of this move.`
++        : '';
++
++      const prompt = `You are a financial market simulator for a business tycoon game. Analyze this business event and return ONLY a valid JSON object with no extra text.
+ 
+ Company: ${companyName}
+ Sector: ${sector}
+@@ -55,13 +80,13 @@ Current Stock Price: $${currentStockPrice.toFixed(2)}
+ Annual Revenue: $${(currentRevenue / 1_000_000).toFixed(1)}M
+ Employees: ${currentEmployees}${historyContext}
+ 
+-Event: "${event}"
++Event: "${event}"${explicitInstruction}
+ 
+ Return this exact JSON structure:
+ {
+-  "stockChangePercent": <number between -25 and 25>,
+-  "revenueChangePercent": <number between -15 and 15>,
+-  "employeeChange": <integer>,
++  "stockChangePercent": <number — use the EXACT percentage if the user specified one, otherwise pick a realistic value>,
++  "revenueChangePercent": <number — scale proportionally to the stock change>,
++  "employeeChange": <integer — scale proportionally to the stock change>,
+   "sentiment": <"very_positive"|"positive"|"neutral"|"negative"|"very_negative">,
+   "headline": <string max 80 chars>,
+   "summary": <string 2-3 sentences>,
+@@ -104,7 +129,9 @@ Return this exact JSON structure:
+       }
+ 
+       const safeResult = {
+-        stockChangePercent: Number(result.stockChangePercent) || 0,
++        stockChangePercent: explicitPercent !== null
++          ? explicitPercent
++          : (Number(result.stockChangePercent) || 0),
+         revenueChangePercent: Number(result.revenueChangePercent) || 0,
+         employeeChange: Math.round(Number(result.employeeChange) || 0),
+         sentiment: result.sentiment || "neutral",
