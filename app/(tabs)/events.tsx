@@ -129,7 +129,7 @@ const SUGGESTIONS = [
 
 export default function EventsScreen() {
   const insets = useSafeAreaInsets();
-  const { eventHistory, isProcessing, submitEvent, autoEventsEnabled, setAutoEventsEnabled } = useCompany();
+  const { eventHistory, isProcessing, isAutoProcessing, submitEvent, autoEventsEnabled, setAutoEventsEnabled } = useCompany();
   const [input, setInput] = useState("");
   const inputRef = useRef<TextInput>(null);
 
@@ -140,11 +140,12 @@ export default function EventsScreen() {
 
   const handleSubmit = async () => {
     const trimmed = input.trim();
+    // Only block on user event processing — auto events run independently
     if (!trimmed || isProcessing) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setInput("");
     Keyboard.dismiss();
-    await submitEvent(trimmed, false);
+    await submitEvent(trimmed);
   };
 
   const handleSuggestion = (s: string) => {
@@ -225,10 +226,12 @@ export default function EventsScreen() {
       )}
 
       <View style={[styles.inputBar, { paddingBottom: tabOffset }]}>
-        {isProcessing && (
+        {(isProcessing || isAutoProcessing) && (
           <View style={styles.processingRow}>
-            <ActivityIndicator size="small" color={Colors.accent} />
-            <Text style={styles.processingText}>Analyzing market impact...</Text>
+            <ActivityIndicator size="small" color={isProcessing ? Colors.accent : Colors.warning} />
+            <Text style={[styles.processingText, { color: isProcessing ? Colors.accent : Colors.warning }]}>
+              {isProcessing ? "Analyzing your event..." : "Auto-event in progress..."}
+            </Text>
           </View>
         )}
         <View style={styles.inputRow}>
@@ -247,6 +250,7 @@ export default function EventsScreen() {
             onPress={handleSubmit}
             disabled={!input.trim() || isProcessing}
             style={[styles.sendBtn, (!input.trim() || isProcessing) && styles.sendBtnDisabled]}
+            testID="send-event-btn"
           >
             <Ionicons name="arrow-up" size={20} color={Colors.dark.background} />
           </Pressable>

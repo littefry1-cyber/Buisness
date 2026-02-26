@@ -45,7 +45,8 @@ interface CompanyContextValue {
   stockHistory: StockDataPoint[];
   eventHistory: EventRecord[];
   isProcessing: boolean;
-  submitEvent: (event: string, isAuto?: boolean) => Promise<void>;
+  isAutoProcessing: boolean;
+  submitEvent: (event: string) => Promise<void>;
   resetCompany: () => void;
   autoEventsEnabled: boolean;
   setAutoEventsEnabled: (enabled: boolean) => void;
@@ -91,8 +92,78 @@ function generateInitialHistory(startPrice: number): StockDataPoint[] {
   return points;
 }
 
-const STORAGE_KEY = "stocksim_state_v3";
-// Auto-event fires every 45 seconds
+async function callProcessEvent(
+  event: string,
+  company: CompanyState,
+  recentHistory: EventRecord[]
+): Promise<Record<string, unknown>> {
+  const baseUrl = getApiUrl();
+  const res = await fetch(`${baseUrl}api/process-event`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      event,
+      companyName: company.name,
+      sector: company.sector,
+      currentStockPrice: company.stockPrice,
+      currentRevenue: company.revenue,
+      currentEmployees: company.employees,
+      eventHistory: recentHistory.slice(0, 5),
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`HTTP ${res.status}: ${errText}`);
+  }
+  return res.json();
+}
+
+function applyEventToCompany(
+  prev: CompanyState,
+  data: Record<string, unknown>
+): CompanyState {
+  const stockChangeFactor = 1 + (Number(data.stockChangePercent) || 0) / 100;
+  const newPrice = Math.max(prev.stockPrice * stockChangeFactor, 0.5);
+  const sharesOutstanding = prev.marketCap / prev.stockPrice;
+  return {
+    ...prev,
+    stockPrice: newPrice,
+    revenue: Math.max(prev.revenue * (1 + (Number(data.revenueChangePercent) || 0) / 100), 0),
+    employees: Math.max(prev.employees + (Math.round(Number(data.employeeChange)) || 0), 0),
+    marketCap: newPrice * sharesOutstanding,
+    peRatio: Math.max(prev.peRatio + (Number(data.stockChangePercent) || 0) * 0.1, 1),
+    cash: Math.max(prev.cash * (1 + (Number(data.revenueChangePercent) || 0) / 200), 0),
+    debt: prev.debt * (1 + (Number(data.revenueChangePercent) || 0) / -400),
+  };
+}
+
+function buildEventRecord(
+  eventText: string,
+  data: Record<string, unknown>,
+  priceBefore: number,
+  priceAfter: number,
+  isAuto: boolean
+): EventRecord {
+  return {
+    id: `${Date.now()}-${Math.random()}`,
+    description: eventText,
+    headline: String(data.headline || eventText).slice(0, 120),
+    summary: String(data.summary || ""),
+    stockChange: Number(data.stockChangePercent) || 0,
+    revenueChangePercent: Number(data.revenueChangePercent) || 0,
+    employeeChange: Math.round(Number(data.employeeChange) || 0),
+    sentiment: String(data.sentiment || "neutral"),
+    analystRating: String(data.analystRating || "Hold"),
+    analystNote: String(data.analystNote || ""),
+    marketReaction: String(data.marketReaction || ""),
+    timestamp: Date.now(),
+    priceBefore,
+    priceAfter,
+    isAuto,
+  };
+}
+
+const STORAGE_KEY = "stocksim_state_v4";
 const AUTO_EVENT_INTERVAL_MS = 45_000;
 
 const CompanyContext = createContext<CompanyContextValue | null>(null);
@@ -101,18 +172,21 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
   const [company, setCompany] = useState<CompanyState>(() => generateInitialCompany());
   const [stockHistory, setStockHistory] = useState<StockDataPoint[]>([]);
   const [eventHistory, setEventHistory] = useState<EventRecord[]>([]);
+  // Separate loading indicators: one for user events, one for auto events
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isAutoProcessing, setIsAutoProcessing] = useState(false);
   const [autoEventsEnabled, setAutoEventsEnabled] = useState(true);
   const [loaded, setLoaded] = useState(false);
-  const processingRef = useRef(false);
-  const autoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Refs to latest values for use inside timer callbacks
+  // Refs for use inside callbacks/timers without stale closures
   const companyRef = useRef(company);
   const eventHistoryRef = useRef(eventHistory);
+  const autoRunningRef = useRef(false); // prevents auto-event concurrency only
+  const autoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   companyRef.current = company;
   eventHistoryRef.current = eventHistory;
 
+  // Load saved state
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then((raw) => {
       if (raw) {
@@ -132,90 +206,41 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  // Persist state
   useEffect(() => {
     if (!loaded) return;
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ company, stockHistory, eventHistory }));
   }, [company, stockHistory, eventHistory, loaded]);
 
-  const submitEvent = useCallback(async (eventText: string, isAuto = false) => {
-    if (processingRef.current) return;
-    processingRef.current = true;
-    setIsProcessing(true);
-
+  // Core event processor — used by both user and auto events
+  const processEvent = useCallback(async (eventText: string, isAuto: boolean) => {
     const currentCompany = companyRef.current;
     const currentHistory = eventHistoryRef.current;
 
     try {
-      const baseUrl = getApiUrl();
-      const res = await fetch(`${baseUrl}api/process-event`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          event: eventText,
-          companyName: currentCompany.name,
-          sector: currentCompany.sector,
-          currentStockPrice: currentCompany.stockPrice,
-          currentRevenue: currentCompany.revenue,
-          currentEmployees: currentCompany.employees,
-          eventHistory: currentHistory.slice(0, 5),
-        }),
-      });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`HTTP ${res.status}: ${errText}`);
-      }
-
-      const data = await res.json();
-
-      const stockChangeFactor = 1 + (data.stockChangePercent || 0) / 100;
-      const newPrice = Math.max(currentCompany.stockPrice * stockChangeFactor, 0.5);
-      const newRevenue = Math.max(currentCompany.revenue * (1 + (data.revenueChangePercent || 0) / 100), 0);
-      const newEmployees = Math.max(currentCompany.employees + (data.employeeChange || 0), 0);
-      const sharesOutstanding = currentCompany.marketCap / currentCompany.stockPrice;
-
-      const eventRecord: EventRecord = {
-        id: `${Date.now()}-${Math.random()}`,
-        description: eventText,
-        headline: data.headline || eventText.slice(0, 80),
-        summary: data.summary || "",
-        stockChange: data.stockChangePercent || 0,
-        revenueChangePercent: data.revenueChangePercent || 0,
-        employeeChange: data.employeeChange || 0,
-        sentiment: data.sentiment || "neutral",
-        analystRating: data.analystRating || "Hold",
-        analystNote: data.analystNote || "",
-        marketReaction: data.marketReaction || "",
-        timestamp: Date.now(),
-        priceBefore: currentCompany.stockPrice,
-        priceAfter: newPrice,
-        isAuto,
-      };
-
-      setCompany((prev) => ({
-        ...prev,
-        stockPrice: newPrice,
-        revenue: newRevenue,
-        employees: newEmployees,
-        marketCap: newPrice * sharesOutstanding,
-        peRatio: Math.max(prev.peRatio + (data.stockChangePercent || 0) * 0.1, 1),
-        cash: Math.max(prev.cash * (1 + (data.revenueChangePercent || 0) / 200), 0),
-        debt: prev.debt * (1 + (data.revenueChangePercent || 0) / -400),
-      }));
-
-      setStockHistory((prev) => [
-        ...prev,
-        { price: newPrice, timestamp: Date.now() },
-      ]);
-
-      setEventHistory((prev) => [eventRecord, ...prev]);
+      const data = await callProcessEvent(eventText, currentCompany, currentHistory);
+      const newCompany = applyEventToCompany(currentCompany, data);
+      const record = buildEventRecord(
+        eventText, data, currentCompany.stockPrice, newCompany.stockPrice, isAuto
+      );
+      setCompany(newCompany);
+      setStockHistory((prev) => [...prev, { price: newCompany.stockPrice, timestamp: Date.now() }]);
+      setEventHistory((prev) => [record, ...prev]);
     } catch (e) {
-      console.error("Event processing failed:", e);
-    } finally {
-      processingRef.current = false;
-      setIsProcessing(false);
+      console.error("processEvent failed:", e);
+      throw e;
     }
   }, []);
+
+  // User-submitted event — always runs, independent of auto events
+  const submitEvent = useCallback(async (eventText: string) => {
+    setIsProcessing(true);
+    try {
+      await processEvent(eventText, false);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [processEvent]);
 
   // Auto-event timer
   useEffect(() => {
@@ -223,16 +248,22 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
 
     const scheduleNext = () => {
       autoTimerRef.current = setTimeout(async () => {
-        if (!processingRef.current) {
+        // Skip if auto is already running; user events can still run concurrently
+        if (!autoRunningRef.current) {
+          autoRunningRef.current = true;
+          setIsAutoProcessing(true);
           try {
             const baseUrl = getApiUrl();
             const res = await fetch(`${baseUrl}api/random-event`);
             if (res.ok) {
               const { event } = await res.json();
-              await submitEvent(event, true);
+              await processEvent(event, true);
             }
           } catch (e) {
             console.error("Auto-event failed:", e);
+          } finally {
+            autoRunningRef.current = false;
+            setIsAutoProcessing(false);
           }
         }
         scheduleNext();
@@ -243,7 +274,7 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     return () => {
       if (autoTimerRef.current) clearTimeout(autoTimerRef.current);
     };
-  }, [loaded, autoEventsEnabled, submitEvent]);
+  }, [loaded, autoEventsEnabled, processEvent]);
 
   const resetCompany = useCallback(() => {
     if (autoTimerRef.current) clearTimeout(autoTimerRef.current);
@@ -255,8 +286,13 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ company, stockHistory, eventHistory, isProcessing, submitEvent, resetCompany, autoEventsEnabled, setAutoEventsEnabled }),
-    [company, stockHistory, eventHistory, isProcessing, submitEvent, resetCompany, autoEventsEnabled]
+    () => ({
+      company, stockHistory, eventHistory,
+      isProcessing, isAutoProcessing,
+      submitEvent, resetCompany,
+      autoEventsEnabled, setAutoEventsEnabled,
+    }),
+    [company, stockHistory, eventHistory, isProcessing, isAutoProcessing, submitEvent, resetCompany, autoEventsEnabled]
   );
 
   return <CompanyContext.Provider value={value}>{children}</CompanyContext.Provider>;
