@@ -1,27 +1,18 @@
-// server/routes.ts
+import type { Express } from "express";
+import { createServer, type Server } from "node:http";
+import OpenAI from "openai";
 
-import express from 'express';
+if (!process.env.AI_INTEGRATIONS_OPENAI_API_KEY) {
+  console.warn("[WARNING] AI_INTEGRATIONS_OPENAI_API_KEY is not set — /api/process-event will fail.");
+}
 
-const router = express.Router();
-
-// Endpoint to get a random event
-router.get('/api/random-event', (req, res) => {
-    const randomEvent = {
-        id: Math.floor(Math.random() * 1000),
-        name: 'Random Event',
-        description: 'A randomly generated event.'
-    };
-    res.json(randomEvent);
+const openai = new OpenAI({
+  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY || "missing-key",
+  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
 
-// Endpoint to process an event
-router.post('/api/process-event', (req, res) => {
-    const { event } = req.body;
-    if (!event) {
-        return res.status(400).json({ error: 'Event data is required.' });
-    }
-    // Process the event (logic can be added here)
-    res.json({ message: 'Event processed successfully', event });
-});
-
-export default router;
+const AUTO_EVENTS = [
+  "Competitors launched a rival product at lower price",
+  "A major client renewed their contract unexpectedly",
+  "Supply chain disruption hit key components",
+  "The CFO announced
